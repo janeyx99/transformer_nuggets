@@ -330,7 +330,7 @@ class _attention(torch.autograd.Function):
         o = torch.empty_like(q)
         BLOCK_M = 128
         BLOCK_N = 64
-        grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
+        grid = (triton.cdiv(seq_len_qv, BLOCK_M), batch_size * num_heads, 1)
         L = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         
         scratch_space = None

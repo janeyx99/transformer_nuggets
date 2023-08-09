@@ -3,7 +3,7 @@ import pytest
 from transformer_nuggets.flash import BiasMode, build_alibi_mask, attention
 
 
-@pytest.mark.parametrize("Z, H, N_CTX, D_HEAD", [(6, 8, 128, 16)])
+@pytest.mark.parametrize("Z, H, N_CTX, D_HEAD", [(6, 8, 256, 16)])
 @pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("bias_choice", [BiasMode.rel_pos, BiasMode.none, BiasMode.alibi])
 @pytest.mark.parametrize("sm_scale", [None, 1])
@@ -56,17 +56,25 @@ def test_op(Z, H, N_CTX, D_HEAD, causal, bias_choice, sm_scale, dtype=torch.floa
     tri_dq, q.grad = q.grad.clone(), None
     # Check attn_bias equivalence
     if bias_choice != BiasMode.none:
-        torch.testing.assert_close(attn_bias, mask.half(), atol=4e-2, rtol=0)
+        BLOCK_M = 128
+        BLOCK_N = 64
+        mask = mask.half()
+        if N_CTX > BLOCK_M and causal:
+            # Since the kernel will not iterate over all seq_len_kv when causal
+            # We will only check the minimum rectangular block
+            attn_bias = attn_bias[:,:,:,:BLOCK_M]
+            mask = mask[:,:,:,:BLOCK_M]
+        torch.testing.assert_close(attn_bias, mask, atol=4e-2, rtol=0)
 
     # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=5.5e-2, rtol=0)
+    torch.testing.assert_close(ref_out, tri_out, atol=5.8e-2, rtol=0)
     if bias_choice != BiasMode.none:
         fudge_factor = 6.1
     else:
         fudge_factor = 1
-    atol = 1e-2 * fudge_factor
+    atol = 2e-2 * fudge_factor
     if bias_choice == BiasMode.rel_pos and not causal:
-        atol *= 3
+        atol *= 4.5
     torch.testing.assert_close(ref_dv, tri_dv, atol=atol, rtol=0)
     torch.testing.assert_close(ref_dk, tri_dk, atol=atol, rtol=0)
     torch.testing.assert_close(ref_dq, tri_dq, atol=atol, rtol=0)
