@@ -133,7 +133,7 @@ def _fwd_kernel(
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
         # -- compute scaling constant ---
         row_max = tl.max(qk, 1)
-        masked_out_rows= masked_row(row_max)
+        masked_out_rows = masked_row(row_max)
         m_i_new = tl.maximum(m_i, row_max)
         # TODO FIX ME
         # alpha = tl.math.exp2(m_i - m_i_new)
@@ -263,11 +263,17 @@ def _bwd_kernel(
                 qk = rel_attention_triton(qk, offs_m_curr[:, None], (offs_n[None, :]), off_hz%H, H)
             elif BIAS_CHOICE == BiasMode.alibi:
                 qk = alibi_attention_triton(qk, offs_m_curr[:, None], (offs_n[None, :]), off_hz%H, H)
+            elif BIAS_CHOICE == BiasMode.inverse_causal:
+                # This should only be used for debugging
+                qk = inverse_causal_mask_triton(qk, offs_m[:, None], (start_n + offs_n[None, :]), off_hz%H, H)
             # ~~~~~~~~~~~~~~~~~~~ This is the end of mask stuff ~~~~~~~~~~~~~~~~~~~
             l_i = tl.load(l_ptrs + offs_m_curr)
+            row_max = tl.max(qk, 1)
+            masked_out_rows= masked_row(row_max)
             # TODO fix me
             # p = tl.math.exp2(qk - l_i[:, None])
             p = tl.math.exp(qk - l_i[:, None])
+            p = tl.where(masked_out_rows[:, None], 0, p)
             # compute dv
             do = tl.load(do_ptrs)
             dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)

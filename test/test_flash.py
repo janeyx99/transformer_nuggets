@@ -110,11 +110,27 @@ def test_flash_masked_block(dtype=torch.float16):
         ref_out = torch.nn.functional.scaled_dot_product_attention(
             q, k, v, scale=sm_scale, is_causal=False, attn_mask=ref_mask
         )
+
+    ref_out.backward(dout)
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dq, q.grad = q.grad.clone(), None
+    
     tri_out, mask = attention(q, k, v, False, sm_scale, BiasMode.inverse_causal, True)  # type: ignore
 
+    tri_out.half()
+    tri_out.backward(dout)
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dq, q.grad = q.grad.clone(), None
+    # Check attn_bias equivalence
+    atol = 2e-2 * 6
     torch.testing.assert_close(ref_out, tri_out, atol=5.8e-2, rtol=0)
     torch.testing.assert_close(ref_mask, mask.half(), atol=4e-2, rtol=0)
-
+    breakpoint()
+    torch.testing.assert_close(ref_dv, tri_dv, atol=atol, rtol=0)
+    torch.testing.assert_close(ref_dk, tri_dk, atol=atol, rtol=0)
+    torch.testing.assert_close(ref_dq, tri_dq, atol=atol, rtol=0)
 
 if __name__ == "__main__":
     pytest.main([__file__])
