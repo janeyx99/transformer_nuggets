@@ -13,61 +13,30 @@ import triton.language as tl
 
 import torch
 import enum
-
-def build_causal_mask(seq_len_q, seq_len_kv):
-    temp_mask = (
-        torch.ones((seq_len_q, seq_len_kv))
-        .tril_()
-        .bool()
-    )
-    mask = torch.zeros_like(temp_mask, dtype=torch.float32)
-    mask.masked_fill_(temp_mask.logical_not(), float("-inf"))
-    return mask
-
-def build_alibi_mask(n_queries, n_keys, n_heads, scale=None, causal=True):
-    if scale is None:
-        assert n_heads%8 == 0
-    m_0  = 2.0 ** (-8.0 / n_heads)
-    slopes = torch.pow(m_0, torch.arange(1, 1 + n_heads))[:, None, None]
-    base = -1 * (torch.arange(n_queries)[:, None] - torch.arange(n_keys)[None, :])
-    if scale is not None:
-        alibi_base = base * scale
-    else:
-        alibi_base = base * slopes
-    alibi_base = alibi_base.expand(n_heads, n_queries, n_keys)
-    if causal:
-        causal_mask = build_causal_mask(n_queries, n_keys)
-        causal_mask = causal_mask.expand(n_heads, n_queries, n_keys)
-        full_mask = alibi_base + causal_mask
-    else:
-        full_mask = alibi_base
-    return full_mask
-
-
-@triton.jit
-def rel_attention_triton(cur, m, n, head_num, num_heads):
-    bias = n - m
-    cur = cur + bias
-    return cur
-
-@triton.jit
-def alibi_attention_triton(cur, m, n, head_num, num_heads):
-    # 0 Indexing
-    alibi_scale = tl.math.exp2(-((head_num + 1) * 8.0 / num_heads))
-    bias = n - m
-    cur = cur + (alibi_scale * bias)
-    return cur
+from transformer_nuggets.flash.masks import (
+    alibi_attention_triton, rel_attention_triton, inverse_causal_mask_triton
+)
 
 class BiasMode(enum.Enum):
     none = 0
     rel_pos = 1
     alibi = 2
+    inverse_causal = 3
 
 @triton.jit
 def max_fn(x, y):
     return tl.math.max(x, y)
 
+@triton.jit
+def masked_row(rows):
+    """ rows is BLOCK_M slice of the QK score
+    Returns: 
+        BLOCK_M vector of boolean values indicating whether this
+        Query x Key position is fully masked
 
+    """
+    return rows == float("-inf")
+    
 @triton.jit
 def _fwd_kernel(
     Q, K, V, sm_scale,
@@ -151,6 +120,9 @@ def _fwd_kernel(
             qk = rel_attention_triton(qk, offs_m[:, None], (start_n + offs_n[None, :]), off_hz%H, H)
         elif BIAS_CHOICE == BiasMode.alibi:
             qk = alibi_attention_triton(qk, offs_m[:, None], (start_n + offs_n[None, :]), off_hz%H, H)
+        elif BIAS_CHOICE == BiasMode.inverse_causal:
+            # This should only be used for debugging
+            qk = inverse_causal_mask_triton(qk, offs_m[:, None], (start_n + offs_n[None, :]), off_hz%H, H)
         if DEBUG_MASK and BIAS_CHOICE != BiasMode.none:
             mask = qk - tl.dot(q,k)
             if IS_CAUSAL:
@@ -160,12 +132,16 @@ def _fwd_kernel(
         if IS_CAUSAL:
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
         # -- compute scaling constant ---
-        m_i_new = tl.maximum(m_i, tl.max(qk, 1))
+        row_max = tl.max(qk, 1)
+        masked_out_rows= masked_row(row_max)
+        m_i_new = tl.maximum(m_i, row_max)
         # TODO FIX ME
         # alpha = tl.math.exp2(m_i - m_i_new)
         # p = tl.math.exp2(qk - m_i_new[:, None])
         alpha = tl.math.exp(m_i - m_i_new)
+        alpha = tl.where(masked_out_rows, 0, alpha)
         p = tl.math.exp(qk - m_i_new[:, None])
+        p = tl.where(masked_out_rows[:, None], 0, p)
         # -- scale and update acc --
         acc_scale = l_i * 0 + alpha  # workaround some compiler bug
         acc *= acc_scale[:, None]
